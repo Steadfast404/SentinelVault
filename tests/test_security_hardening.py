@@ -5,7 +5,10 @@ import os
 import shutil
 import tempfile
 import unittest
+import base64
 
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.padding import PKCS7
 from auth.hashing import hash_password
 from auth.session import (
     cleanup_session_state,
@@ -20,6 +23,7 @@ from stego.embed import MAX_PAYLOAD_SIZE, create_sample_cover_image, embed_bytes
 from vault.crypto import (
     AuthenticationFailedError,
     decrypt_aead,
+    derive_legacy_key,
     derive_vault_key,
     encrypt_aead,
 )
@@ -223,6 +227,36 @@ class TestNegativeSecurityHardening(unittest.TestCase):
         for bad_user in invalid_usernames:
             with self.assertRaises(StoreSecurityError):
                 validate_username(bad_user)
+
+    def test_legacy_cbc_user_is_migrated_to_v2(self) -> None:
+        password = "LegacyPassword2026!"
+        salt = os.urandom(16)
+        legacy_key = derive_legacy_key(password, salt)
+
+        iv = os.urandom(16)
+        padder = PKCS7(algorithms.AES.block_size).padder()
+        padded = padder.update(
+            b'[{"site":"example.com","username":"alice","password":"secret"}]')
+        padded += padder.finalize()
+        encryptor = Cipher(algorithms.AES(legacy_key),
+                           modes.CBC(iv)).encryptor()
+        ciphertext = encryptor.update(padded) + encryptor.finalize()
+        user = {
+            "username": "legacy_user",
+            "vault_salt": base64.b64encode(salt).decode("ascii"),
+            "vault": {
+                "iv": base64.b64encode(iv).decode("ascii"),
+                "ciphertext": base64.b64encode(ciphertext).decode("ascii"),
+            },
+        }
+
+        self.store.migrate_legacy_user(user, password)
+
+        credentials = self.store.read_credentials(
+            user, derive_vault_key(password, salt))
+        self.assertEqual(credentials[0].site, "example.com")
+        self.assertEqual(user["version"], 2)
+        self.assertEqual(user["vault"]["algorithm"], "AES-256-GCM")
 
     def test_logout_cleanup_purges_all_sensitive_data(self) -> None:
         """Negative Test: Sensitive data audit after logout ensures zero secrets remain in state."""

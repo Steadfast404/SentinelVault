@@ -15,7 +15,9 @@ from vault.crypto import (
     decrypt_aead,
     derive_backup_key,
     derive_private_key_encryption_key,
+    derive_legacy_key,
     derive_vault_key,
+    decrypt_legacy_cbc,
     encrypt_aead,
 )
 from vault.models import Credential
@@ -153,6 +155,37 @@ class VaultStore:
         plaintext = decrypt_aead(vault_data, vault_key, vault_aad)
         raw_list = json.loads(plaintext.decode("utf-8"))
         return [Credential.from_dict(item) for item in raw_list]
+
+    def migrate_legacy_user(self, user: dict, password: str) -> bool:
+        """Upgrade a pre-v2 AES-CBC record after the password is verified."""
+        vault_data = user.get("vault")
+        if not isinstance(vault_data, dict) or "iv" not in vault_data:
+            return False
+
+        salt = base64.b64decode(user["vault_salt"])
+        legacy_key = derive_legacy_key(password, salt)
+        raw_list = json.loads(decrypt_legacy_cbc(
+            vault_data, legacy_key).decode("utf-8"))
+        credentials = [Credential.from_dict(item) for item in raw_list]
+        new_vault_key = derive_vault_key(password, salt)
+        self.write_credentials(user, new_vault_key, credentials)
+
+        private_data = user.get("private_key")
+        if isinstance(private_data, str):
+            private_pem = decrypt_legacy_cbc(
+                private_data, legacy_key).decode("utf-8")
+            private_aad = f"sentinelvault:private_key:v2:{user['username'].lower()}".encode(
+                "utf-8")
+            user["private_key"] = encrypt_aead(
+                private_pem.encode("utf-8"),
+                derive_private_key_encryption_key(password, salt),
+                private_aad,
+            )
+
+        user["format"] = "sentinelvault_user"
+        user["version"] = 2
+        self.save_user(user["username"], user)
+        return True
 
     def write_credentials(
         self,
@@ -331,3 +364,17 @@ class VaultStore:
         self.write_credentials(restored_user, vault_key, creds)
         self.save_user(username, restored_user)
         return restored_user
+
+    def get_safe_storage_preview(self, username: str) -> Optional[dict]:
+        """
+        Return a safe representation of the persisted on-disk JSON record.
+        Sensitive secrets (TOTP secret, raw private key) are masked,
+        allowing students to demonstrate AES-256-GCM ciphertext at rest without exposing secrets.
+        """
+        user = self.load_user(username)
+        if not user:
+            return None
+        safe_copy = dict(user)
+        if "totp_secret" in safe_copy:
+            safe_copy["totp_secret"] = "•••••••• [PROTECTED IN STORAGE] ••••••••"
+        return safe_copy

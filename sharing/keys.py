@@ -105,3 +105,17 @@ class TrustedKeyStore:
             )
 
         return True, f"Key verified and trusted for '{contact_name}'."
+
+    def list_contacts(self) -> Dict[str, dict]:
+        """List all trusted contacts and their pinned fingerprints."""
+        return self._load()
+
+    def remove_contact(self, contact_name: str) -> bool:
+        """Remove a trusted contact from the store."""
+        contacts = self._load()
+        key = contact_name.strip().lower()
+        if key in contacts:
+            del contacts[key]
+            self._save(contacts)
+            return True
+        return False
