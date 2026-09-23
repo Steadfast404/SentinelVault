@@ -70,16 +70,19 @@ def render(store) -> None:
                 "Master Password", type="password", key="login_pass_input")
 
             # Check if user is currently locked out
+            user_locked = False
             if username:
                 locked, seconds_left = is_locked_out(username)
                 if locked:
                     st.error(
                         f"⛔ Account temporarily locked due to repeated failed attempts. Please wait {seconds_left}s."
                     )
-                    return
+                    user_locked = True
 
             if st.button("Continue to Second Factor ➡️", type="primary", key="btn_check_password"):
-                if not username or not password:
+                if user_locked:
+                    st.error("⛔ Account is currently locked. Please wait.")
+                elif not username or not password:
                     st.warning(
                         "Please provide both username and master password.")
                 else:
@@ -87,30 +90,35 @@ def render(store) -> None:
                     if locked:
                         st.error(
                             f"⛔ Account locked. Wait {seconds_left}s before retrying.")
-                        return
-
-                    user = store.load_user(username)
-                    if not user or not verify_master_password(user, password):
-                        attempts, newly_locked = record_failed_attempt(
-                            username)
-                        if newly_locked:
-                            st.error(
-                                "⛔ Maximum failed attempts reached. Account locked for 60 seconds.")
-                        else:
-                            st.error(
-                                f"❌ Authentication failed. Attempt {attempts}/5.")
                     else:
-                        # Derive vault key in memory; never store plaintext master password in session_state!
-                        salt = base64.b64decode(user["vault_salt"])
-                        vault_key = derive_vault_key(password, salt)
+                        user = store.load_user(username)
+                        if not user or not verify_master_password(user, password):
+                            attempts, newly_locked = record_failed_attempt(
+                                username)
+                            if newly_locked:
+                                st.error(
+                                    "⛔ Maximum failed attempts reached. Account locked for 60 seconds.")
+                            else:
+                                st.error(
+                                    f"❌ Authentication failed. Attempt {attempts}/5.")
+                        else:
+                            try:
+                                store.migrate_legacy_user(user, password)
+                            except Exception:
+                                st.error(
+                                    "This vault uses an unsupported legacy encryption format and could not be migrated.")
+                                user = None
 
-                        st.session_state.pending_user = user
-                        st.session_state.pending_username = user["username"]
-                        st.session_state.temp_vault_key = vault_key
-                        st.session_state.login_stage = "otp"
-                        # Purge widget password state immediately
-                        st.session_state.pop("login_pass_input", None)
-                        st.rerun()
+                            if user:
+                                # Derive vault key in memory; never store plaintext master password in session_state!
+                                salt = base64.b64decode(user["vault_salt"])
+                                vault_key = derive_vault_key(password, salt)
+
+                                st.session_state.pending_user = user
+                                st.session_state.pending_username = user["username"]
+                                st.session_state.temp_vault_key = vault_key
+                                st.session_state.login_stage = "otp"
+                                st.rerun()
 
         # Stage 2: 2FA TOTP Check
         elif st.session_state.login_stage == "otp":
@@ -143,9 +151,7 @@ def render(store) -> None:
                         if locked:
                             st.error(
                                 f"⛔ Account locked due to failed attempts. Please wait {seconds_left}s.")
-                            return
-
-                        if verify_totp(user, otp_input):
+                        elif verify_totp(user, otp_input):
                             # Both factors verified!
                             reset_failed_attempts(username)
                             st.session_state.authenticated = True
@@ -153,12 +159,11 @@ def render(store) -> None:
                             st.session_state.username = username
                             st.session_state.vault_key = vault_key
 
-                            # Purge all pending stage variables and widget states
+                            # Purge all pending stage variables
                             st.session_state.login_stage = "password"
                             st.session_state.pop("pending_user", None)
                             st.session_state.pop("pending_username", None)
                             st.session_state.pop("temp_vault_key", None)
-                            st.session_state.pop("login_otp_input", None)
                             st.rerun()
                         else:
                             # CRITICAL: OTP failures must trigger lockout tracking!
@@ -182,7 +187,6 @@ def render(store) -> None:
                     st.session_state.pop("pending_user", None)
                     st.session_state.pop("pending_username", None)
                     st.session_state.pop("temp_vault_key", None)
-                    st.session_state.pop("login_otp_input", None)
                     st.rerun()
 
     # -------------------------------------------------------------
@@ -226,9 +230,6 @@ def render(store) -> None:
                         "username": reg_username,
                         "secret": secret,
                     }
-                    # Clear password widgets
-                    st.session_state.pop("reg_pass", None)
-                    st.session_state.pop("reg_confirm", None)
                     st.success(
                         f"Vault for '{reg_username}' initialized successfully!")
                 except Exception as exc:
@@ -281,6 +282,12 @@ def render(store) -> None:
         rec_otp = st.text_input(
             "Current 6-digit TOTP Code", max_chars=6, key="rec_otp_input")
 
+        simulate_tamper = st.checkbox(
+            "🧪 Demonstrate Security Failure: Simulate Tampered Backup File",
+            help="Alters bytes in the backup envelope to demonstrate that disaster recovery detects tampering and rejects unauthenticated files.",
+            key="rec_simulate_tamper",
+        )
+
         if backup_file and st.button("Authenticate and Restore Account", type="primary"):
             if not rec_password or not rec_otp:
                 st.error(
@@ -293,6 +300,14 @@ def render(store) -> None:
                     else:
                         extracted_blob = file_bytes
 
+                    if simulate_tamper:
+                        corrupt_byte = b"\xFF" if extracted_blob[-50:-
+                                                                 49] != b"\xFF" else b"\x00"
+                        extracted_blob = extracted_blob[:-50] + \
+                            corrupt_byte + extracted_blob[-49:]
+                        st.warning(
+                            "⚠️ Simulation: Injected 1 corrupted byte into backup envelope.")
+
                     restored_user = store.restore_backup_envelope(
                         blob=extracted_blob,
                         password=rec_password,
@@ -303,7 +318,5 @@ def render(store) -> None:
                         f"✅ Successfully authenticated and restored account '{restored_user['username']}'! "
                         "You can now switch to 'Unlock Vault' and sign in."
                     )
-                    st.session_state.pop("rec_pass_input", None)
-                    st.session_state.pop("rec_otp_input", None)
                 except Exception as exc:
                     st.error(f"❌ Recovery failed: {exc}")

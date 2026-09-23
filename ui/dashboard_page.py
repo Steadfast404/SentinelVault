@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import streamlit as st
 
 from vault.crypto import evaluate_password_strength, generate_password
@@ -40,6 +41,12 @@ def render(store) -> None:
     # -----------------------------------------------------------------
     # SECTION: ADD NEW CREDENTIAL (WITH GENERATOR & STRENGTH METER)
     # -----------------------------------------------------------------
+    if st.session_state.pop("clear_new_cred_form", False):
+        st.session_state["new_cred_site"] = ""
+        st.session_state["new_cred_user"] = ""
+        st.session_state["new_cred_pass_input"] = ""
+        st.session_state["new_cred_notes"] = ""
+
     with st.expander("➕ Add New Credential", expanded=(len(credentials) == 0)):
         st.subheader("Credential Details")
 
@@ -62,20 +69,20 @@ def render(store) -> None:
 
             if "gen_pwd_val" in st.session_state:
                 st.code(st.session_state.gen_pwd_val, language="text")
-                if st.button("Use Generated Password"):
-                    st.session_state.new_cred_pwd = st.session_state.gen_pwd_val
+                if st.button("Use Generated Password", key="btn_apply_gen_pwd"):
+                    st.session_state["new_cred_pass_input"] = st.session_state.gen_pwd_val
+                    st.session_state.pop("gen_pwd_val", None)
+                    st.rerun()
 
         col_in1, col_in2 = st.columns(2)
         with col_in1:
             site = st.text_input(
                 "Service / Website URL", placeholder="e.g. github.com", key="new_cred_site").strip()
-            username = st.text_input(
+            username_in = st.text_input(
                 "Username or Email", placeholder="e.g. alice@example.com", key="new_cred_user").strip()
         with col_in2:
-            default_pwd = st.session_state.get("new_cred_pwd", "")
             pwd_input = st.text_input(
                 "Password",
-                value=default_pwd,
                 type="password",
                 placeholder="Enter or generate a password",
                 key="new_cred_pass_input",
@@ -90,20 +97,18 @@ def render(store) -> None:
                 "Notes (Optional)", placeholder="e.g. Recovery codes or PIN", key="new_cred_notes").strip()
 
         if st.button("Encrypt & Store Credential 💾", type="primary", key="btn_save_cred"):
-            if not site or not username or not pwd_input:
+            if not site or not username_in or not pwd_input:
                 st.error("Site, username, and password are required.")
             else:
                 try:
                     new_entry = Credential(
-                        site=site, username=username, password=pwd_input, notes=notes)
+                        site=site, username=username_in, password=pwd_input, notes=notes)
                     credentials.append(new_entry)
                     store.write_credentials(user, vault_key, credentials)
                     store.save_user(st.session_state.username, user)
+                    st.session_state["clear_new_cred_form"] = True
                     st.success(
                         f"Encrypted and stored credential for '{site}' successfully!")
-                    st.session_state.pop("new_cred_pwd", None)
-                    st.session_state.pop("gen_pwd_val", None)
-                    st.session_state.pop("new_cred_pass_input", None)
                     st.rerun()
                 except Exception:
                     st.error("Failed to save credential securely.")
@@ -192,3 +197,31 @@ def render(store) -> None:
                             st.session_state[f"editing_{entry.id}"] = False
                             st.success("Credential updated.")
                             st.rerun()
+
+    # -----------------------------------------------------------------
+    # SECTION: VAULT SECURITY & SAFE STORAGE PREVIEW
+    # -----------------------------------------------------------------
+    st.divider()
+    with st.expander("🛡️ Vault Security Details & Storage Preview (Safe Metadata)"):
+        st.markdown(
+            """
+            This section allows demonstration of the defense-in-depth storage security:
+            * **Encryption Primitive:** `AES-256-GCM` Authenticated Encryption with Associated Data (AEAD)
+            * **Integrity Protection:** 128-bit GCM authentication tag verifies data has not been modified
+            * **Replay & Malleability Defense:** Fresh random 12-byte (96-bit) nonce per encryption
+            * **Key Derivation:** `PBKDF2-HMAC-SHA256` with 600,000 iterations and domain separation
+            * **Context Binding (AAD):** Bound to `sentinelvault:vault:v2:<username>` to prevent cross-account splicing
+            * **Storage:** Persisted exclusively as ciphertext on disk — no plaintext credentials touch persistent storage!
+            """
+        )
+
+        safe_preview = store.get_safe_storage_preview(
+            st.session_state.username)
+        if safe_preview:
+            st.subheader(
+                "Encrypted Record on Disk (`.sentinelvault/<username>.json`)")
+            st.code(json.dumps(safe_preview, indent=2), language="json")
+            st.caption(
+                "🔒 Notice: The credentials vault and private key are encrypted into ciphertext blobs. "
+                "The master password and credential plaintext never touch disk."
+            )

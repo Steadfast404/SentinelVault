@@ -1,106 +1,73 @@
-# SentinelVault Context and Security Decisions
+# Security Context and Design Rationale
 
-[README.md](README.md) is the implementation and usage guide. [workflow.md](workflow.md) maps each runtime phase to its owning modules and functions. This document records the problem that shaped SentinelVault, the architecture decisions made during hardening, and the remaining boundaries that should not be overstated.
+## Problem
 
-## 1. Problem Faced
+A password vault concentrates valuable credentials in one place. SentinelVault demonstrates how layered authentication, authenticated encryption, protected recovery, and authenticated sharing reduce the impact of password guessing, local file theft, tampering, and impersonation.
 
-A password vault is a high-value single point of failure. An unprotected JSON file exposes every credential; a password-only login is vulnerable when the master password is guessed or stolen; a backup can become an unauthenticated account replacement mechanism; and a sharing feature can leak data or accept a substituted public key.
+## Threat Model
 
-The initial project specification and early implementation also diverged from the security model being demonstrated:
+The project considers an attacker who can guess passwords, observe or modify stored ciphertext, submit malformed or forged backups, tamper with a sharing package, or substitute a public key. It does not claim to protect a compromised operating system, an already-unlocked process, or a multi-process server deployment.
 
-- `context.md` described AES-CBC, while the hardened implementation uses AES-256-GCM.
-- The original design treated steganography as protection, although LSB steganography only conceals the existence of a payload.
-- Early recovery semantics could be read as allowing an uploaded backup to replace an account without proving ownership.
-- The UI design needed to avoid rendering TOTP helpers and retaining master passwords in Streamlit state.
-- Sharing required a verifiable sender identity, not only encryption to a recipient.
-- Security claims needed to be tied to executable negative tests rather than only prose.
+## Design Decisions
 
-The current code addresses the primary risks with authenticated encryption, versioned metadata, authenticated recovery, centralized lockout, replay prevention, size limits, and test coverage.
+### bcrypt
 
-## 2. Current Security Model
+Master passwords are verified with bcrypt rather than stored directly. Its intentionally expensive password hashing makes offline guessing of the stored verifier more costly.
 
-SentinelVault is a local Streamlit password vault with five cooperating layers:
+### TOTP
 
-| Layer              | Current implementation                                                                                                                       | Security purpose                                                                                 |
-| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| Authentication     | bcrypt password hash with work factor 12 in `auth/hashing.py`                                                                                | Makes stored password verification data expensive to crack and never stores the master password. |
-| Second factor      | RFC 6238 TOTP, strict six-digit validation, replay prevention, and five-failure/60-second lockout in `auth/totp.py` and `auth/session.py`    | Requires the authenticator code after password verification and prevents same-step reuse.        |
-| At-rest encryption | AES-256-GCM with 12-byte nonces, 128-bit tags, PBKDF2-HMAC-SHA256 with 600,000 iterations, and domain-separated keys in `vault/crypto.py`    | Detects tampering and keeps credentials unreadable without the derived key.                      |
-| Covert backup      | PNG-only RGB LSB embedding with a magic header, explicit payload length, 5 MB limit, and Pillow pixel limits in `stego/`                     | Conceals an already authenticated backup; it is not the confidentiality boundary.                |
-| Secure sharing     | RSA-2048 OAEP-SHA256 for an ephemeral AES key, AES-256-GCM for the payload, RSA-PSS-SHA256 signatures, and fingerprint storage in `sharing/` | Provides recipient confidentiality and sender authenticity/integrity.                            |
+TOTP adds possession of an authenticator to the password requirement. Login accepts a strict six-digit code, rejects reuse within the same 30-second timestep, and allows a small clock-drift window.
 
-## 3. Hardening Decisions and Considered Updates
+### PBKDF2-HMAC-SHA256
 
-### 3.1 AES-CBC to AES-GCM
+The master password and random 16-byte salt derive 256-bit keys with PBKDF2-HMAC-SHA256 using 600,000 iterations. The work factor slows password guessing while the salt prevents identical passwords from producing identical derived keys across accounts.
 
-AES-CBC was rejected for the final design because encryption alone does not authenticate ciphertext or metadata. The final format uses `encrypt_aead()` and `decrypt_aead()` in `vault/crypto.py`. Each payload receives a fresh 96-bit nonce and an authentication tag. AAD binds the payload to its format and identity, for example `sentinelvault:vault:v2:<username>`.
+### AES-256-GCM
 
-Separate PBKDF2 domains derive vault, private-key, and backup keys. This prevents one derived key from being silently reused for unrelated purposes. The v2 format marker is stored with user, backup, and sharing containers so readers can reject unsupported formats.
+AES-GCM provides confidentiality and authenticated integrity in one operation. It is used for the credential vault, the RSA private key, and authenticated backup envelopes.
 
-### 3.2 Authenticated backups and recovery
+Each encryption uses a fresh 12-byte nonce. GCM appends an authentication tag; changing ciphertext or authenticated metadata causes decryption to fail. Additional Authenticated Data (AAD) binds the ciphertext to its purpose and account, such as `sentinelvault:vault:v2:<username>`.
 
-Backups contain the credentials and account material needed for recovery, but the complete backup payload is encrypted and authenticated with a backup-specific key. The backup AAD includes the username and timestamp.
+### Domain-separated keys
 
-Recovery has two modes:
+The vault, private-key, and backup keys use different PBKDF2 domains. A derived key for one purpose is therefore not reused for another purpose. The backup also receives its own random salt and timestamp-bound AAD.
 
-- In-session restore requires an authenticated session, the active username, and the backup password. A backup for another user is rejected.
-- Disaster recovery authenticates the backup with the password, requires a valid TOTP code, and refuses to create a restored account if the target account already exists. This prevents an unauthenticated upload from overwriting an existing account.
+## Backup and Recovery
 
-### 3.3 Session and UI secret handling
+Backup creation requires the master password again. `VaultStore.create_backup_envelope()` decrypts the required values in memory, packages credentials and account material, and protects the payload with a backup-specific PBKDF2 key and AES-GCM.
 
-The UI does not store the plaintext master password as a persistent session field. After password verification, it stores a derived vault key temporarily while the second factor is completed. Logout and inactivity timeout call `cleanup_session_state()` to remove authentication state, keys, pending values, widget buffers, generated passwords, imported credentials, and dynamic edit/toggle fields.
+An active-session restore requires a matching username and password-authenticated envelope. Disaster recovery requires the password and current TOTP code, and refuses to overwrite an existing account. A modified username, timestamp, ciphertext, password, or TOTP value prevents successful recovery.
 
-The TOTP QR code and Base32 secret are shown only in the registration ceremony, until the user acknowledges that the secret was saved. Login renders only an OTP input. The testing-only `get_current_code_for_testing()` helper remains in `auth/totp.py` for automated tests and is not imported by the production UI.
+## Steganography Is Concealment
 
-### 3.4 Centralized authentication controls
+PNG LSB steganography hides an already encrypted payload inside RGB pixel least-significant bits. It does not provide encryption or authenticity. The backup's AES-GCM authentication remains the security boundary, while the image carrier only reduces obvious visibility of the file's purpose.
 
-Password and OTP failures use the same process-wide, thread-safe `CentralizedRateLimiter`. Five consecutive failures trigger a 60-second lockout. A successful complete login clears failed attempts. Successful TOTP verification records the accepted timestep so the same code cannot be replayed during its validity window.
+## Secure Sharing Architecture
 
-### 3.5 Sharing identity and trust
+Sharing is a hybrid construction:
 
-Each user receives an RSA-2048 keypair. The private PEM is encrypted at rest using a private-key-specific derived key and AES-GCM. A sharing package is version 2 and signs the encrypted session key, nonce, and ciphertext together.
+1. Selected credentials are encrypted with an ephemeral AES-256-GCM session key.
+2. RSA-OAEP with SHA-256 encrypts that session key to the recipient's RSA-2048 public key.
+3. RSA-PSS with SHA-256 signs the encrypted session key, nonce, and ciphertext using the sender's private key.
+4. The recipient verifies the signature before RSA-OAEP unwrapping and AES-GCM decryption.
 
-`TrustedKeyStore` persists a contact's public key and standardized `SHA256:XX:XX:...` fingerprint. Its API and substitution tests are implemented. The current sharing page displays fingerprints and accepts public keys, but it does not yet require a pinned contact match before every import/export. That is a remaining UI integration task, not a claim made by this documentation.
+The package uses fixed AAD `sentinelvault_pgp_v2`. A changed package fails signature verification or AEAD authentication.
 
-### 3.6 Steganography as concealment
+## Public-Key Fingerprints and Trusted Contacts
 
-The stego layer accepts PNG only, limits images to 10,000,000 pixels, encodes a magic header and payload length, and caps payloads at 5 MB. It does not authenticate the payload itself. An extracted backup or sharing package must still pass its AES-GCM or signature verification step.
+The application calculates a SHA-256 digest of the public-key PEM and displays it as `SHA256:XX:XX:...`. `TrustedKeyStore` persists a contact name, public key, and fingerprint in the local store. Pinning a key creates an identity reference; later `verify_trust()` compares the received key's fingerprint with the pinned value and detects substitution. The UI warns for untrusted keys and checks pinned contacts during relevant sharing verification, but a user may still choose manual input for an unpinned key.
 
-## 4. Current Residual Risks
+## Session Security
 
-The implementation is hardened for the course demonstration, but it is not a production password manager:
+The application keeps a derived vault key in Streamlit session state after the password and TOTP stages succeed; it does not promote the plaintext master password to persistent session state. Five minutes without activity triggers cleanup. **🔒 Lock Vault & Logout** invokes the same cleanup, which removes authentication state, derived keys, pending values, imported credentials, and dynamic widget state.
 
-- The local JSON store contains password hashes, TOTP enrollment secrets, public metadata, and encrypted material; filesystem access must still be protected by the operating system.
-- Some Streamlit widget values and the verified incoming credential preview exist transiently until their action, discard, logout, or timeout path removes them. Python cannot reliably zero immutable strings in memory.
-- `TrustedKeyStore` is available and tested, but the sharing UI currently reports fingerprints rather than enforcing a pin automatically.
-- The recovery payload includes account metadata inside an authenticated envelope; confidentiality depends on the master password and backup key derivation.
-- The global rate limiter is process-local. A multi-process or network deployment would require shared rate-limit state and a different threat model.
+Password and TOTP failures share a process-local counter. Five failures lock the username for 60 seconds.
 
-These limitations are recorded so the demo can explain what each control guarantees without claiming that concealment, a local GUI, or a test helper provides stronger protection than it actually does.
+## Scope and Genuine Limitations
 
-## 5. Verification
-
-The executable security evidence is in:
-
-- [tests/test_crypto.py](tests/test_crypto.py): GCM round trips, nonce freshness, AAD tampering, and domain separation.
-- [tests/test_auth.py](tests/test_auth.py): bcrypt, TOTP, replay prevention, lockout, cleanup, and inactivity timeout.
-- [tests/test_security_hardening.py](tests/test_security_hardening.py): negative tamper, overwrite, path traversal, payload limit, substitution, and state cleanup tests.
-- [tests/test_sharing.py](tests/test_sharing.py): hybrid package, signature, recipient, stego, and fingerprint trust tests.
-- [tests/test_e2e_vault.py](tests/test_e2e_vault.py): registration through backup recovery and two-user sharing.
-
-Run the full suite with:
-
-```powershell
-.\.venv\Scripts\pytest.exe -v
-```
-
-The current baseline is 36 passing tests.
-
-## 6. Course Mapping
-
-- Lab 3: bcrypt and TOTP two-factor authentication.
-- Lab 4: password-based key derivation and authenticated symmetric encryption at rest.
-- Lab 5: PNG LSB steganographic concealment and input validation.
-- Lab 6: RSA hybrid sharing, digital signatures, and public-key identity.
-
-The project contribution is the threat-model-driven composition of these techniques, plus the negative tests that demonstrate how tampering and misuse are rejected.
+- The local JSON store still contains password hashes, the TOTP enrollment secret, public metadata, and encrypted material; operating-system access control remains important.
+- Python and Streamlit cannot guarantee allocator-level zeroization of immutable strings.
+- The rate limiter is process-local and does not provide distributed server protection.
+- Steganography can be detected by a capable analyst and does not replace encryption.
+- Trusted-key checks are available through `TrustedKeyStore` and the sharing UI, but manual unpinned-key workflows remain possible.
+- This implementation is a short educational lab project rather than a production password manager.

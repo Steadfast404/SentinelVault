@@ -1,4 +1,5 @@
 from __future__ import annotations
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 import base64
 import math
@@ -9,8 +10,10 @@ from typing import Dict, Optional, Tuple
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives.padding import PKCS7
+LEGACY_PBKDF2_ITERATIONS = 100_000
 
 PBKDF2_ITERATIONS = 600_000
 SALT_SIZE = 16
@@ -110,6 +113,39 @@ def decrypt_aead(payload: dict[str, str], key: bytes, aad: bytes = b"") -> bytes
         if isinstance(exc, (AuthenticationFailedError, CryptographicError)):
             raise
         raise CryptographicError(f"Decryption failed: {exc}") from exc
+
+
+def derive_legacy_key(password: str, salt: bytes) -> bytes:
+    """Derive the key used by pre-v2 AES-CBC user records."""
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=KEY_SIZE,
+        salt=salt,
+        iterations=LEGACY_PBKDF2_ITERATIONS,
+    )
+    return kdf.derive(password.encode("utf-8"))
+
+
+def decrypt_legacy_cbc(value: dict[str, str] | str, key: bytes) -> bytes:
+    """Decrypt the old ``iv``/``ciphertext`` AES-CBC representation."""
+    if isinstance(value, str):
+        parts = value.split(":", 1)
+        if len(parts) != 2:
+            raise CryptographicError("Malformed legacy encrypted value")
+        iv_value, ciphertext_value = parts
+    else:
+        iv_value = value.get("iv", "")
+        ciphertext_value = value.get("ciphertext", "")
+
+    try:
+        iv = base64.b64decode(iv_value)
+        ciphertext = base64.b64decode(ciphertext_value)
+        decryptor = Cipher(algorithms.AES(key), modes.CBC(iv)).decryptor()
+        padded = decryptor.update(ciphertext) + decryptor.finalize()
+        unpadder = PKCS7(algorithms.AES.block_size).unpadder()
+        return unpadder.update(padded) + unpadder.finalize()
+    except Exception as exc:
+        raise CryptographicError("Legacy vault decryption failed") from exc
 
 
 # Compatible wrappers for store.py and other callers
