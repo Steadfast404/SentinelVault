@@ -10,7 +10,7 @@ from auth.totp import verify_code_with_replay_prevention
 # Centralized brute-force lockout configuration
 MAX_FAILED_ATTEMPTS: int = 5
 LOCKOUT_DURATION_SECONDS: int = 60
-INACTIVITY_TIMEOUT_SECONDS: int = 300  # 5 minutes
+INACTIVITY_TIMEOUT_SECONDS: int = 900  # 15 minutes
 
 
 class CentralizedRateLimiter:
