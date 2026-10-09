@@ -1,0 +1,1 @@
+export default function AppLayout({ children }: { children: React.ReactNode }) { return <div className='app-layout'><nav>Sidebar (Vault/Favorites/Folders/Notes/Cards/Identity/Security/Sharing/Devices/Settings)</nav><main>{children}</main></div>; }

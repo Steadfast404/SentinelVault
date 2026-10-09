@@ -1,0 +1,1 @@
+import { test, expect } from '@playwright/test'; test('landing page loads', async ({ page }) => { await page.goto('/'); await expect(page.getByText('Landing Page')).toBeVisible(); }); test('api readyz endpoint proxy works', async ({ request }) => { const response = await request.get('/api/v1/readyz'); expect(response.status()).toBe(200); });

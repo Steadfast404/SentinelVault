@@ -1,0 +1,1 @@
+import { render, screen } from '@testing-library/react'; import { describe, it, expect } from 'vitest'; import Layout from './layout'; describe('Auth Layout', () => { it('renders without crashing', () => { render(<Layout><div data-testid="child"></div></Layout>); expect(screen.getByTestId('child')).toBeInTheDocument(); }); });

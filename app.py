@@ -25,9 +25,9 @@ if "authenticated" not in st.session_state:
 if "username" not in st.session_state:
     st.session_state.username = ""
 
-# Enforce session inactivity timeout (auto-lock after 5 minutes)
-if check_inactivity_timeout(st.session_state):
-    st.rerun()
+# # Enforce session inactivity timeout (auto-lock after 5 minutes)
+# if check_inactivity_timeout(st.session_state):
+#     st.rerun()
 
 # Render login / registration / recovery if not authenticated
 if not st.session_state.authenticated:

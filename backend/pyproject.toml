@@ -1,0 +1,39 @@
+[project]
+name = "sentinelvault-backend"
+version = "0.1.0"
+description = "FastAPI backend for SentinelVault"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic",
+    "pydantic-settings",
+    "sqlalchemy[asyncio]",
+    "asyncpg",
+    "alembic",
+    "redis",
+    "structlog",
+    "argon2-cffi",
+    "cryptography",
+    "pyotp",
+    "webauthn",
+    "aiosmtplib",
+    "jinja2",
+    "aioboto3",
+    "typer",
+    "uuid-utils",
+    "orjson",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-cov",
+    "httpx",
+    "testcontainers[postgres,redis]",
+    "ruff",
+    "mypy",
+    "schemathesis",
+    "freezegun",
+]

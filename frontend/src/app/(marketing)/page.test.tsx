@@ -1,0 +1,1 @@
+import { render, screen } from '@testing-library/react'; import { describe, it, expect } from 'vitest'; import Page from './page'; describe('Marketing Page', () => { it('renders without crashing', () => { render(<Page />); expect(screen.getByText('Landing Page')).toBeInTheDocument(); }); });
